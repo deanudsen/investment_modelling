@@ -50,7 +50,7 @@ TICKER_ASSUMPTIONS = {
 
 # Categories for hybrid allocation
 GROWTH = {"CNQ", "XEQT", "QSR", "MG"}
-STABLE = {"ENB", "TPZ", "FRU", "T", "MTL", "FSZ", "SPB"}
+STABLE = {"ENB", "TPZ", "FRU", "T", "MTL", "FSZ", "SPB", "BEP.UN"}
 HIGH_YIELD = {"HMAX", "SMAX", "DGS", "NWH.UN", "SRU.UN"}
 
 TARGET_CAT_WEIGHTS = {"Growth": 0.4, "Stable": 0.4, "HighYield": 0.2}
@@ -92,6 +92,18 @@ def load_snapshot_from_file(csv_path: str) -> dict:
         shares = float(row["Quantity"])
         price = float(row["Price"])
 
+        # Validate quantity and price are positive
+        if shares <= 0:
+            raise ValueError(
+                f"Invalid Quantity for ticker '{ticker}' in portfolio '{portfolio}': "
+                f"{shares}. Quantity must be positive."
+            )
+        if price <= 0:
+            raise ValueError(
+                f"Invalid Price for ticker '{ticker}' in portfolio '{portfolio}': "
+                f"{price}. Price must be positive."
+            )
+
         if ticker not in TICKER_ASSUMPTIONS:
             raise ValueError(
                 f"No assumptions entry in TICKER_ASSUMPTIONS for ticker '{ticker}'. "
@@ -99,6 +111,14 @@ def load_snapshot_from_file(csv_path: str) -> dict:
             )
 
         assump = TICKER_ASSUMPTIONS[ticker]
+
+        # Validate ticker assumptions contain required keys
+        required_keys = {"div", "price_g", "div_g", "nav_g"}
+        missing_keys = required_keys - set(assump.keys())
+        if missing_keys:
+            raise ValueError(
+                f"TICKER_ASSUMPTIONS for '{ticker}' is missing required keys: {missing_keys}"
+            )
 
         snapshot.setdefault(portfolio, {})
         snapshot[portfolio][ticker] = {
@@ -124,6 +144,14 @@ def compute_initial_portfolio_weights(snapshot: dict) -> dict:
             total += info["shares"] * info["price"]
         values[p] = total
     grand = sum(values.values())
+    
+    if grand == 0:
+        # If all portfolios have zero value, distribute contributions equally
+        num_portfolios = len(values)
+        if num_portfolios == 0:
+            return {}
+        return {p: 1.0 / num_portfolios for p in values}
+    
     return {p: v / grand for p, v in values.items()}
 
 
@@ -158,6 +186,37 @@ def run_realistic_projection(snapshot: dict,
         year_index = m // 12  # 0..years
         real_discount = (1 + ANNUAL_INFLATION) ** (m / 12)
 
+        # Record snapshot FIRST (before applying any changes for this month)
+        for portfolio, holdings in state.items():
+            for ticker, info in holdings.items():
+                annual_income_nominal = info["shares"] * info["div"]
+                value_nominal = info["shares"] * info["price"]
+                annual_income_real = annual_income_nominal / real_discount
+                value_real = value_nominal / real_discount
+
+                rows.append(
+                    {
+                        "Portfolio": portfolio,
+                        "MonthIndex": m,
+                        "YearIndex": year_index,
+                        "Date": date,
+                        "Ticker": ticker,
+                        "Category": category_of(ticker),
+                        "Shares": info["shares"],
+                        "Price": info["price"],
+                        "Value": value_nominal,
+                        "Income": annual_income_nominal,
+                        "RealValue": value_real,
+                        "RealIncome": annual_income_real,
+                        "MonthlyTotalContribution": monthly_total_contrib,
+                    }
+                )
+
+        # Skip evolution on the last month (we just need to record the final state)
+        if m == months:
+            continue
+
+        # Apply contributions, price evolution, and DRIP for months 0..months-1
         for portfolio, holdings in state.items():
             # Portfolio-level contribution this month
             port_contrib = monthly_total_contrib * portfolio_weights[portfolio]
@@ -167,11 +226,22 @@ def run_realistic_projection(snapshot: dict,
             for ticker in holdings.keys():
                 cat_tickers[category_of(ticker)].append(ticker)
 
+            # Calculate effective weights - redistribute empty category weights proportionally
+            active_cats = {cat: tickers for cat, tickers in cat_tickers.items() if tickers}
+            if active_cats:
+                # Sum of original weights for categories that have tickers
+                active_weight_sum = sum(TARGET_CAT_WEIGHTS[cat] for cat in active_cats)
+                # Scale weights so they sum to 1.0
+                effective_weights = {
+                    cat: TARGET_CAT_WEIGHTS[cat] / active_weight_sum
+                    for cat in active_cats
+                }
+            else:
+                effective_weights = {}
+
             # Allocate contributions by category, then equally by ticker
-            for cat_name, tickers in cat_tickers.items():
-                if not tickers:
-                    continue
-                cat_weight = TARGET_CAT_WEIGHTS[cat_name]
+            for cat_name, tickers in active_cats.items():
+                cat_weight = effective_weights[cat_name]
                 cat_contrib = port_contrib * cat_weight
                 per_ticker_contrib = cat_contrib / len(tickers)
                 for ticker in tickers:
@@ -204,31 +274,6 @@ def run_realistic_projection(snapshot: dict,
                 # Monthly dividend DRIP
                 monthly_div_cash = info["shares"] * (info["div"] / 12.0)
                 info["shares"] += monthly_div_cash / info["price"]
-
-            # Record snapshot for this month
-            for ticker, info in holdings.items():
-                annual_income_nominal = info["shares"] * info["div"]
-                value_nominal = info["shares"] * info["price"]
-                annual_income_real = annual_income_nominal / real_discount
-                value_real = value_nominal / real_discount
-
-                rows.append(
-                    {
-                        "Portfolio": portfolio,
-                        "MonthIndex": m,
-                        "YearIndex": year_index,
-                        "Date": date,
-                        "Ticker": ticker,
-                        "Category": category_of(ticker),
-                        "Shares": info["shares"],
-                        "Price": info["price"],
-                        "Value": value_nominal,
-                        "Income": annual_income_nominal,
-                        "RealValue": value_real,
-                        "RealIncome": annual_income_real,
-                        "MonthlyTotalContribution": monthly_total_contrib,
-                    }
-                )
 
     monthly_df = pd.DataFrame(rows)
     yearly_df = monthly_df[monthly_df["MonthIndex"] % 12 == 0].copy()
