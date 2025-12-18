@@ -8,6 +8,7 @@ annual_inflation: 0.02
 random_seed: 42
 
 # File paths
+# Set holdings_csv to load from CSV file, or set to null to use initial_holdings below
 holdings_csv: "income_baseline_holdings.csv"
 output_dir: "projection_output"
 
@@ -139,3 +140,64 @@ ticker_assumptions:
     div_g: 0.02
     nav_g: 0.00
 
+# Initial holdings (as of 2025-12-18)
+# Used when holdings_csv is set to null
+# Format: Portfolio -> Ticker -> {quantity, price}
+initial_holdings:
+  Talimar:
+    BEP.UN:
+      quantity: 142.0
+      price: 37.46
+    CNQ:
+      quantity: 132.0
+      price: 43.69
+    DGS:
+      quantity: 1111.0
+      price: 7.595
+    ENB:
+      quantity: 20.0
+      price: 64.69
+    FSZ:
+      quantity: 850.0
+      price: 6.08
+    HMAX:
+      quantity: 353.0
+      price: 16.27
+    SMAX:
+      quantity: 300.93966
+      price: 20.59
+    XEQT:
+      quantity: 31.98781
+      price: 39.923
+    MG:
+      quantity: 17.68005
+      price: 75.61
+    MTL:
+      quantity: 333.0
+      price: 16.03
+    NWH.UN:
+      quantity: 909.0
+      price: 5.145
+    QSR:
+      quantity: 25.0
+      price: 96.85
+    T:
+      quantity: 424.0
+      price: 17.40
+    TPZ:
+      quantity: 100.0
+      price: 27.21
+  Personal:
+    MTL:
+      quantity: 41.0
+      price: 16.04
+    SPB:
+      quantity: 97.52066
+      price: 7.18
+  TFSA:
+    FRU:
+      quantity: 100.0
+      price: 15.07
+    SRU.UN:
+      quantity: 6.0
+      price: 25.75

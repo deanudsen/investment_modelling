@@ -82,6 +82,63 @@ def make_category_of(growth: set, stable: set, high_yield: set):
 
 
 # -----------------------------
+# BUILD SNAPSHOT FROM CONFIG
+# -----------------------------
+def load_snapshot_from_config(
+    initial_holdings: dict,
+    ticker_assumptions: dict
+) -> dict:
+    """Load holdings snapshot from config initial_holdings section."""
+    snapshot: dict[str, dict[str, dict]] = {}
+
+    for portfolio, holdings in initial_holdings.items():
+        for ticker, holding_info in holdings.items():
+            shares = float(holding_info["quantity"])
+            price = float(holding_info["price"])
+
+            # Validate quantity and price are positive
+            if shares <= 0:
+                raise ValueError(
+                    f"Invalid quantity for ticker '{ticker}' in portfolio "
+                    f"'{portfolio}': {shares}. Quantity must be positive."
+                )
+            if price <= 0:
+                raise ValueError(
+                    f"Invalid price for ticker '{ticker}' in portfolio "
+                    f"'{portfolio}': {price}. Price must be positive."
+                )
+
+            if ticker not in ticker_assumptions:
+                raise ValueError(
+                    f"No assumptions entry in ticker_assumptions for ticker "
+                    f"'{ticker}'. Please add it to config.yaml."
+                )
+
+            assump = ticker_assumptions[ticker]
+
+            # Validate ticker assumptions contain required keys
+            required_keys = {"div", "price_g", "div_g", "nav_g"}
+            missing_keys = required_keys - set(assump.keys())
+            if missing_keys:
+                raise ValueError(
+                    f"ticker_assumptions for '{ticker}' is missing required "
+                    f"keys: {missing_keys}"
+                )
+
+            snapshot.setdefault(portfolio, {})
+            snapshot[portfolio][ticker] = {
+                "shares": shares,
+                "price": price,
+                "div": assump["div"],
+                "price_g": assump["price_g"],
+                "div_g": assump["div_g"],
+                "nav_g": assump["nav_g"],
+            }
+
+    return snapshot
+
+
+# -----------------------------
 # BUILD SNAPSHOT FROM FILE
 # -----------------------------
 def load_snapshot_from_file(
@@ -416,7 +473,8 @@ def main(config_path: str = "config.yaml"):
     # Extract config values
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(exist_ok=True)
-    holdings_csv = config["holdings_csv"]
+    # Can be null to use initial_holdings instead
+    holdings_csv = config.get("holdings_csv")
     contribution_levels = config["contribution_levels"]
     years = config["years"]
     interactive = config.get("interactive", True)
@@ -431,10 +489,22 @@ def main(config_path: str = "config.yaml"):
     # Archive existing output files
     archive_existing_files(output_dir, interactive=interactive)
 
-    # Load holdings snapshot from CSV
-    logger.info(f"Loading holdings from {holdings_csv}")
+    # Load holdings snapshot
     ticker_assumptions = config["ticker_assumptions"]
-    snapshot = load_snapshot_from_file(holdings_csv, ticker_assumptions)
+    if holdings_csv:
+        logger.info(f"Loading holdings from {holdings_csv}")
+        snapshot = load_snapshot_from_file(holdings_csv, ticker_assumptions)
+    else:
+        logger.info("Loading holdings from config (initial_holdings)")
+        initial_holdings = config.get("initial_holdings", {})
+        if not initial_holdings:
+            raise ValueError(
+                "No holdings source: holdings_csv is null and "
+                "initial_holdings is empty in config."
+            )
+        snapshot = load_snapshot_from_config(
+            initial_holdings, ticker_assumptions
+        )
 
     # Compute portfolio weights (for splitting total monthly contrib)
     portfolio_weights = compute_initial_portfolio_weights(snapshot)
