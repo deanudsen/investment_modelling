@@ -1,82 +1,103 @@
-import pandas as pd
-import numpy as np
-from pathlib import Path
+import logging
 import shutil
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
 
 # -----------------------------
-# CONFIG
+# LOGGING SETUP
 # -----------------------------
-HOLDINGS_CSV = "income_baseline_holdings.csv"  # <- your holdings snapshot file
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-BASE_DATE = pd.Timestamp("2025-12-10")
-YEARS = 10
-MONTHS = YEARS * 12
-ANNUAL_INFLATION = 0.02
-
-# Use a fixed seed for reproducible "random" dividend variation
-RNG = np.random.default_rng(42)
-
-# Contribution scenarios (TOTAL per month, across all portfolios)
-CONTRIBUTION_LEVELS = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000]
-
-OUTPUT_DIR = Path("projection_output")
-OUTPUT_DIR.mkdir(exist_ok=True)
 
 # -----------------------------
-# TICKER-LEVEL ASSUMPTIONS
+# CONFIG LOADING
 # -----------------------------
-# These are the realistic assumptions we agreed on.
-# You can adjust any of these in one place.
-
-TICKER_ASSUMPTIONS = {
-    "BEP.UN": {"div": 2.07,   "price_g": 0.05,  "div_g": 0.03, "nav_g": 0.00},
-    "CNQ":    {"div": 2.35,   "price_g": 0.10,  "div_g": 0.10, "nav_g": 0.00},
-    "DGS":    {"div": 1.20,   "price_g": -0.02, "div_g": -0.02,"nav_g": -0.02},
-    "ENB":    {"div": 3.74,   "price_g": 0.05,  "div_g": 0.03, "nav_g": 0.00},
-    "FSZ":    {"div": 0.42,   "price_g": 0.02,  "div_g": 0.00, "nav_g": 0.00},
-    "HMAX":   {"div": 2.16,   "price_g": 0.00,  "div_g": 0.00, "nav_g": 0.00},
-    "SMAX":   {"div": 2.20,   "price_g": 0.00,  "div_g": 0.00, "nav_g": 0.00},
-    "XEQT":   {"div": 0.73,   "price_g": 0.10,  "div_g": 0.02, "nav_g": 0.00},
-    "MG":     {"div": 1.80,   "price_g": 0.10,  "div_g": 0.02, "nav_g": 0.00},
-    "MTL":    {"div": 0.92,   "price_g": 0.02,  "div_g": 0.01, "nav_g": 0.00},
-    "NWH.UN": {"div": 0.36*0.8,"price_g": -0.02,"div_g": 0.00, "nav_g": -0.02},  # 20% cut applied
-    "QSR":    {"div": 2.20,   "price_g": 0.10,  "div_g": 0.06, "nav_g": 0.00},
-    "T":      {"div": 1.64,   "price_g": 0.02,  "div_g": 0.01, "nav_g": 0.00},
-    "TPZ":    {"div": 1.36,   "price_g": 0.05,  "div_g": 0.06, "nav_g": 0.00},
-    "SPB":    {"div": 0.49,   "price_g": 0.02,  "div_g": 0.01, "nav_g": 0.00},
-    "FRU":    {"div": 1.08,   "price_g": 0.05,  "div_g": 0.04, "nav_g": 0.00},
-    "SRU.UN": {"div": 1.50,   "price_g": 0.00,  "div_g": 0.00, "nav_g": 0.00},
-}
-
-# Categories for hybrid allocation
-GROWTH = {"CNQ", "XEQT", "QSR", "MG"}
-STABLE = {"ENB", "TPZ", "FRU", "T", "MTL", "FSZ", "SPB", "BEP.UN"}
-HIGH_YIELD = {"HMAX", "SMAX", "DGS", "NWH.UN", "SRU.UN"}
-
-TARGET_CAT_WEIGHTS = {"Growth": 0.4, "Stable": 0.4, "HighYield": 0.2}
+def load_config(config_path: str = "config.yaml") -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
-def category_of(ticker: str) -> str:
-    if ticker in GROWTH:
-        return "Growth"
-    if ticker in STABLE:
+def validate_config(config: dict) -> None:
+    """
+    Validate configuration and warn about potential issues.
+
+    Warns if any ticker in ticker_assumptions is not assigned to a category.
+    """
+    ticker_assumptions = config.get("ticker_assumptions", {})
+    categories = config.get("categories", {})
+
+    # Build set of all categorized tickers
+    categorized = set()
+    for cat_name, tickers in categories.items():
+        categorized.update(tickers)
+
+    # Check for uncategorized tickers
+    for ticker in ticker_assumptions:
+        if ticker not in categorized:
+            logger.warning(
+                f"Ticker '{ticker}' is in ticker_assumptions but not "
+                f"assigned to any category. It will default to 'Stable'."
+            )
+
+    # Check for categorized tickers missing assumptions
+    for ticker in categorized:
+        if ticker not in ticker_assumptions:
+            logger.warning(
+                f"Ticker '{ticker}' is in categories but missing from "
+                f"ticker_assumptions. This will cause an error if used."
+            )
+
+
+# -----------------------------
+# BUILD CATEGORY SETS FROM CONFIG
+# -----------------------------
+def build_category_sets(config: dict) -> tuple[set, set, set]:
+    """Build GROWTH, STABLE, HIGH_YIELD sets from config."""
+    categories = config.get("categories", {})
+    growth = set(categories.get("Growth", []))
+    stable = set(categories.get("Stable", []))
+    high_yield = set(categories.get("HighYield", []))
+    return growth, stable, high_yield
+
+
+def make_category_of(growth: set, stable: set, high_yield: set):
+    """Create a category_of function with the given category sets."""
+    def category_of(ticker: str) -> str:
+        if ticker in growth:
+            return "Growth"
+        if ticker in stable:
+            return "Stable"
+        if ticker in high_yield:
+            return "HighYield"
         return "Stable"
-    if ticker in HIGH_YIELD:
-        return "HighYield"
-    return "Stable"
+    return category_of
 
 
 # -----------------------------
 # BUILD SNAPSHOT FROM FILE
 # -----------------------------
-def load_snapshot_from_file(csv_path: str) -> dict:
+def load_snapshot_from_file(
+    csv_path: str,
+    ticker_assumptions: dict
+) -> dict:
+    """Load holdings snapshot from CSV file."""
     df = pd.read_csv(csv_path)
 
     # Make sure the columns we need exist
     required = {"Portfolio", "Ticker", "Quantity", "Price"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns in holdings file: {missing}")
+        raise ValueError(
+            f"Missing required columns in holdings file: {missing}"
+        )
 
     # Aggregate per (Portfolio, Ticker)
     grouped = (
@@ -95,29 +116,30 @@ def load_snapshot_from_file(csv_path: str) -> dict:
         # Validate quantity and price are positive
         if shares <= 0:
             raise ValueError(
-                f"Invalid Quantity for ticker '{ticker}' in portfolio '{portfolio}': "
-                f"{shares}. Quantity must be positive."
+                f"Invalid Quantity for ticker '{ticker}' in portfolio "
+                f"'{portfolio}': {shares}. Quantity must be positive."
             )
         if price <= 0:
             raise ValueError(
-                f"Invalid Price for ticker '{ticker}' in portfolio '{portfolio}': "
-                f"{price}. Price must be positive."
+                f"Invalid Price for ticker '{ticker}' in portfolio "
+                f"'{portfolio}': {price}. Price must be positive."
             )
 
-        if ticker not in TICKER_ASSUMPTIONS:
+        if ticker not in ticker_assumptions:
             raise ValueError(
-                f"No assumptions entry in TICKER_ASSUMPTIONS for ticker '{ticker}'. "
-                f"Please add it there before running the model."
+                f"No assumptions entry in ticker_assumptions for ticker "
+                f"'{ticker}'. Please add it to config.yaml."
             )
 
-        assump = TICKER_ASSUMPTIONS[ticker]
+        assump = ticker_assumptions[ticker]
 
         # Validate ticker assumptions contain required keys
         required_keys = {"div", "price_g", "div_g", "nav_g"}
         missing_keys = required_keys - set(assump.keys())
         if missing_keys:
             raise ValueError(
-                f"TICKER_ASSUMPTIONS for '{ticker}' is missing required keys: {missing_keys}"
+                f"ticker_assumptions for '{ticker}' is missing required "
+                f"keys: {missing_keys}"
             )
 
         snapshot.setdefault(portfolio, {})
@@ -137,6 +159,7 @@ def load_snapshot_from_file(csv_path: str) -> dict:
 # PORTFOLIO WEIGHTS (for splitting contributions)
 # -----------------------------
 def compute_initial_portfolio_weights(snapshot: dict) -> dict:
+    """Compute portfolio weights based on initial values."""
     values = {}
     for p, holdings in snapshot.items():
         total = 0.0
@@ -144,32 +167,43 @@ def compute_initial_portfolio_weights(snapshot: dict) -> dict:
             total += info["shares"] * info["price"]
         values[p] = total
     grand = sum(values.values())
-    
+
     if grand == 0:
         # If all portfolios have zero value, distribute contributions equally
         num_portfolios = len(values)
         if num_portfolios == 0:
             return {}
         return {p: 1.0 / num_portfolios for p in values}
-    
+
     return {p: v / grand for p, v in values.items()}
 
 
 # -----------------------------
 # CORE SIMULATION
 # -----------------------------
-def run_realistic_projection(snapshot: dict,
-                             portfolio_weights: dict,
-                             monthly_total_contrib: float,
-                             years: int = YEARS) -> tuple[pd.DataFrame, pd.DataFrame]:
+def run_realistic_projection(
+    snapshot: dict,
+    portfolio_weights: dict,
+    monthly_total_contrib: float,
+    config: dict,
+    category_of,
+    rng: np.random.Generator
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Returns (monthly_df, yearly_df) for a given total monthly contribution amount.
+    Run projection simulation.
+
+    Returns (monthly_df, yearly_df) for a given total monthly contribution.
+
     Uses:
       - realistic price growth per ticker
       - realistic dividend evolution (including variability for HMAX/SMAX/DGS)
       - monthly contributions with hybrid allocation (Growth/Stable/HighYield)
       - inflation-adjusted values @ 2% per year
     """
+    years = config["years"]
+    base_date = pd.Timestamp(config["base_date"])
+    annual_inflation = config["annual_inflation"]
+    target_cat_weights = config["category_weights"]
 
     # Deep copy snapshot so we don't mutate the original
     state = {
@@ -178,13 +212,13 @@ def run_realistic_projection(snapshot: dict,
     }
 
     months = years * 12
-    dates = pd.date_range(BASE_DATE, periods=months + 1, freq="MS")
+    dates = pd.date_range(base_date, periods=months + 1, freq="MS")
     rows = []
 
     for m in range(months + 1):
         date = dates[m]
         year_index = m // 12  # 0..years
-        real_discount = (1 + ANNUAL_INFLATION) ** (m / 12)
+        real_discount = (1 + annual_inflation) ** (m / 12)
 
         # Record snapshot FIRST (before applying any changes for this month)
         for portfolio, holdings in state.items():
@@ -212,7 +246,7 @@ def run_realistic_projection(snapshot: dict,
                     }
                 )
 
-        # Skip evolution on the last month (we just need to record the final state)
+        # Skip evolution on the last month (we just need to record final state)
         if m == months:
             continue
 
@@ -226,14 +260,20 @@ def run_realistic_projection(snapshot: dict,
             for ticker in holdings.keys():
                 cat_tickers[category_of(ticker)].append(ticker)
 
-            # Calculate effective weights - redistribute empty category weights proportionally
-            active_cats = {cat: tickers for cat, tickers in cat_tickers.items() if tickers}
+            # Calculate effective weights - redistribute empty category weights
+            active_cats = {
+                cat: tickers
+                for cat, tickers in cat_tickers.items()
+                if tickers
+            }
             if active_cats:
                 # Sum of original weights for categories that have tickers
-                active_weight_sum = sum(TARGET_CAT_WEIGHTS[cat] for cat in active_cats)
+                active_weight_sum = sum(
+                    target_cat_weights[cat] for cat in active_cats
+                )
                 # Scale weights so they sum to 1.0
                 effective_weights = {
-                    cat: TARGET_CAT_WEIGHTS[cat] / active_weight_sum
+                    cat: target_cat_weights[cat] / active_weight_sum
                     for cat in active_cats
                 }
             else:
@@ -257,13 +297,13 @@ def run_realistic_projection(snapshot: dict,
                 # Dividend behaviour
                 if ticker in {"HMAX", "SMAX"}:
                     # ±10%/year variability, smoothed monthly
-                    noise_annual = RNG.uniform(-0.10, 0.10)
+                    noise_annual = rng.uniform(-0.10, 0.10)
                     noise_month = noise_annual / 12
                     info["div"] *= (1 + noise_month)
                 elif ticker == "DGS":
                     # Base negative drift plus ±15% variability
                     base_monthly_div_g = (1 + info["div_g"]) ** (1 / 12) - 1
-                    noise_annual = RNG.uniform(-0.15, 0.15)
+                    noise_annual = rng.uniform(-0.15, 0.15)
                     noise_month = noise_annual / 12
                     info["div"] *= (1 + base_monthly_div_g + noise_month)
                 else:
@@ -283,115 +323,167 @@ def run_realistic_projection(snapshot: dict,
 # -----------------------------
 # ARCHIVE EXISTING FILES
 # -----------------------------
-def archive_existing_files():
+def archive_existing_files(output_dir: Path, interactive: bool = True):
     """
-    Archives existing output files to an archive subdirectory.
+    Archive existing output files to an archive subdirectory.
+
     Removes old files in archive, then moves current output files there.
-    Retries with pause if files cannot be deleted or moved (e.g., open in Excel).
+
+    Args:
+        output_dir: Path to the output directory
+        interactive: If True, prompt user to retry on file errors.
+                     If False, skip files that can't be accessed.
     """
-    archive_dir = OUTPUT_DIR / "archive"
-    
+    archive_dir = output_dir / "archive"
+
     # Create archive directory if it doesn't exist
     archive_dir.mkdir(exist_ok=True)
-    
+
     # Remove existing files in archive with retry
     for existing_file in archive_dir.glob("*.xlsx"):
-        max_retries = 3
-        
+        max_retries = 3 if interactive else 1
+
         for attempt in range(max_retries):
             try:
                 existing_file.unlink()
                 break
             except (PermissionError, OSError) as e:
-                if attempt < max_retries - 1:
-                    print(f"Warning: Cannot delete {existing_file.name} "
-                          f"(may be open in Excel).")
+                if interactive and attempt < max_retries - 1:
+                    logger.warning(
+                        f"Cannot delete {existing_file.name} "
+                        f"(may be open in Excel)."
+                    )
                     input("Please close the file and press Enter to retry...")
+                elif not interactive:
+                    logger.warning(
+                        f"Skipping delete of {existing_file.name}: {e}"
+                    )
+                    break
                 else:
-                    print(f"Error: Failed to delete {existing_file.name} after "
-                          f"{max_retries} attempts: {e}")
+                    logger.error(
+                        f"Failed to delete {existing_file.name} "
+                        f"after {max_retries} attempts: {e}"
+                    )
                     raise
-    
+
     # Move current output files to archive with retry
     moved_count = 0
-    for output_file in OUTPUT_DIR.glob("*.xlsx"):
+    for output_file in output_dir.glob("*.xlsx"):
         if output_file.is_file():
             dest = archive_dir / output_file.name
-            max_retries = 3
-            
+            max_retries = 3 if interactive else 1
+
             for attempt in range(max_retries):
                 try:
                     shutil.move(str(output_file), str(dest))
                     moved_count += 1
                     break
                 except (PermissionError, OSError) as e:
-                    if attempt < max_retries - 1:
-                        print(f"Warning: Cannot move {output_file.name} "
-                              f"(may be open in Excel).")
-                        input("Please close the file and press Enter to retry...")
+                    if interactive and attempt < max_retries - 1:
+                        logger.warning(
+                            f"Cannot move {output_file.name} "
+                            f"(may be open in Excel)."
+                        )
+                        input(
+                            "Please close the file and press Enter to retry..."
+                        )
+                    elif not interactive:
+                        logger.warning(
+                            f"Skipping archive of {output_file.name}: {e}"
+                        )
+                        break
                     else:
-                        print(f"Error: Failed to move {output_file.name} after "
-                              f"{max_retries} attempts: {e}")
+                        logger.error(
+                            f"Failed to move {output_file.name} "
+                            f"after {max_retries} attempts: {e}"
+                        )
                         raise
-    
+
     if moved_count > 0:
-        print(f"Archived {moved_count} file(s) to {archive_dir}")
+        logger.info(f"Archived {moved_count} file(s) to {archive_dir}")
 
 
 # -----------------------------
 # RUN ALL SCENARIOS & SAVE
 # -----------------------------
-def main():
-    # 0. Archive existing output files
-    archive_existing_files()
-    
-    # 1. Load holdings snapshot from CSV
-    snapshot = load_snapshot_from_file(HOLDINGS_CSV)
+def main(config_path: str = "config.yaml"):
+    """Main entry point."""
+    # Load and validate configuration
+    logger.info(f"Loading configuration from {config_path}")
+    config = load_config(config_path)
+    validate_config(config)
 
-    # 2. Compute portfolio weights (for splitting total monthly contrib)
+    # Extract config values
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(exist_ok=True)
+    holdings_csv = config["holdings_csv"]
+    contribution_levels = config["contribution_levels"]
+    years = config["years"]
+    interactive = config.get("interactive", True)
+
+    # Build category sets and category_of function
+    growth, stable, high_yield = build_category_sets(config)
+    category_of = make_category_of(growth, stable, high_yield)
+
+    # Initialize RNG with seed from config
+    rng = np.random.default_rng(config["random_seed"])
+
+    # Archive existing output files
+    archive_existing_files(output_dir, interactive=interactive)
+
+    # Load holdings snapshot from CSV
+    logger.info(f"Loading holdings from {holdings_csv}")
+    ticker_assumptions = config["ticker_assumptions"]
+    snapshot = load_snapshot_from_file(holdings_csv, ticker_assumptions)
+
+    # Compute portfolio weights (for splitting total monthly contrib)
     portfolio_weights = compute_initial_portfolio_weights(snapshot)
 
     summary_rows = []
 
-    for level in CONTRIBUTION_LEVELS:
-        print(f"Running scenario: ${level}/month")
+    for level in contribution_levels:
+        logger.info(f"Running scenario: ${level}/month")
 
         monthly_df, yearly_df = run_realistic_projection(
             snapshot=snapshot,
             portfolio_weights=portfolio_weights,
             monthly_total_contrib=level,
-            years=YEARS,
+            config=config,
+            category_of=category_of,
+            rng=rng,
         )
 
         # Save per-scenario Excel
-        xl_path = OUTPUT_DIR / f"portfolio_10yr_realistic_M{level}.xlsx"
+        xl_path = output_dir / f"portfolio_{years}yr_realistic_M{level}.xlsx"
         with pd.ExcelWriter(xl_path, engine="xlsxwriter") as writer:
             monthly_df.to_excel(writer, sheet_name="Monthly", index=False)
             yearly_df.to_excel(writer, sheet_name="Yearly", index=False)
 
-        # Scenario-level Year-10 totals (YearIndex == 10)
-        yr10 = yearly_df[yearly_df["YearIndex"] == YEARS]
-        total_value = yr10["Value"].sum()
-        total_income = yr10["Income"].sum()
-        total_real_value = yr10["RealValue"].sum()
-        total_real_income = yr10["RealIncome"].sum()
+        # Scenario-level Year-N totals (YearIndex == years)
+        yr_final = yearly_df[yearly_df["YearIndex"] == years]
+        total_value = yr_final["Value"].sum()
+        total_income = yr_final["Income"].sum()
+        total_real_value = yr_final["RealValue"].sum()
+        total_real_income = yr_final["RealIncome"].sum()
 
         summary_rows.append(
             {
                 "MonthlyContribution": level,
-                "Year10NominalValue": total_value,
-                "Year10NominalIncome": total_income,
-                "Year10RealValue": total_real_value,
-                "Year10RealIncome": total_real_income,
+                f"Year{years}NominalValue": total_value,
+                f"Year{years}NominalIncome": total_income,
+                f"Year{years}RealValue": total_real_value,
+                f"Year{years}RealIncome": total_real_income,
             }
         )
 
     # Master summary table
     summary_df = pd.DataFrame(summary_rows)
-    summary_xlsx = OUTPUT_DIR / "portfolio_10yr_realistic_summary.xlsx"
+    summary_xlsx = output_dir / f"portfolio_{years}yr_realistic_summary.xlsx"
 
     with pd.ExcelWriter(summary_xlsx, engine="xlsxwriter") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+    logger.info(f"All scenarios complete. Output saved to {output_dir}")
 
 
 if __name__ == "__main__":
