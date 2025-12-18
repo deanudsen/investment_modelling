@@ -9,7 +9,8 @@ random_seed: 42
 
 # File paths
 # Set holdings_csv to load from CSV file, or set to null to use initial_holdings below
-holdings_csv: "income_baseline_holdings.csv"
+# holdings_csv: "income_baseline_holdings.csv"
+holdings_csv: null
 output_dir: "projection_output"
 
 # Set to false for unattended/automated runs (skips file retry prompts)
